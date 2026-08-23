@@ -7,15 +7,15 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 from winml.modelkit.quant import WinMLQuantizationConfig, quantize_onnx
+from winml.modelkit.utils import STAGING_PREFIX
 
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     import numpy as np
     import pytest
 
@@ -104,16 +104,17 @@ def _install_fake_ort_quantization(monkeypatch: pytest.MonkeyPatch, *, quantize_
     monkeypatch.setitem(sys.modules, "onnxruntime.quantization.quant_utils", quant_utils_module)
 
 
-def test_quantize_onnx_removes_only_exact_external_data_sidecar(
+def test_quantize_onnx_leaves_existing_output_untouched_until_publish(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Cleanup should remove only the exact .data sidecar for the output model."""
+    """A previous output and its sidecar must survive until quantization succeeds."""
     model_path = tmp_path / "model.onnx"
     _write_minimal_onnx_model(model_path)
     output_path = tmp_path / "quantized.onnx"
     exact_sidecar = tmp_path / f"{output_path.name}.data"
     extra_suffix_sidecar = tmp_path / f"{output_path.name}.data.bak"
+    output_path.write_text("previous model")
     exact_sidecar.write_text("stale")
     extra_suffix_sidecar.write_text("keep")
 
@@ -123,11 +124,22 @@ def test_quantize_onnx_removes_only_exact_external_data_sidecar(
 
     def fake_quantize(*, model_input, model_output: str, quant_config) -> None:
         assert model_input is input_model
-        assert model_output == str(output_path.resolve())
         assert quant_config.use_external_data_format is True
-        assert not exact_sidecar.exists()
-        assert extra_suffix_sidecar.exists()
-        output_path.write_text("quantized")
+
+        # The intermediate goes to a staging directory beside the output, never
+        # to the output path itself.
+        intermediate = Path(model_output)
+        assert intermediate.name == output_path.name
+        assert intermediate.parent != output_path.parent
+        assert intermediate.parent.parent == output_path.parent
+        assert intermediate.parent.name.startswith(STAGING_PREFIX)
+
+        # The user's previous output is still intact while ORT is running.
+        assert output_path.read_text() == "previous model"
+        assert exact_sidecar.read_text() == "stale"
+        assert extra_suffix_sidecar.read_text() == "keep"
+
+        intermediate.write_text("quantized")
 
     _install_fake_ort_quantization(monkeypatch, quantize_impl=fake_quantize)
 
@@ -158,7 +170,9 @@ def test_quantize_onnx_removes_only_exact_external_data_sidecar(
     )
 
     assert result.success is True
-    assert extra_suffix_sidecar.exists()
+    # Nothing beside the output is collateral damage, and no staging dir leaks.
+    assert extra_suffix_sidecar.read_text() == "keep"
+    assert not any(p.name.startswith(STAGING_PREFIX) for p in tmp_path.iterdir())
 
 
 def _write_opsetless_onnx_model(path: Path) -> None:

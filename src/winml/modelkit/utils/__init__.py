@@ -20,10 +20,12 @@ from .model_input import (
     classify_model_input,
     resolve_model_input,
 )
+from .staging import STAGING_PREFIX, publish_on_success, scratch_dir
 
 
 __all__ = [
     "MANIFEST_FILENAME",
+    "STAGING_PREFIX",
     "ManifestStage",
     "ModelInput",
     "ModelInputKind",
@@ -35,6 +37,8 @@ __all__ = [
     "load_hf_components_from_onnx",
     "merge_config",
     "normalize_ep_name",
+    "publish_on_success",
     "resolve_model_input",
     "save_local_model_configs",
+    "scratch_dir",
 ]
