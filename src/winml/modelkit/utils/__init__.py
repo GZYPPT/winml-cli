@@ -13,6 +13,7 @@ from .hub_utils import (
     load_hf_components_from_onnx,
     save_local_model_configs,
 )
+from .interrupt import hard_kill_on_ctrl_c
 from .manifest import MANIFEST_FILENAME, ManifestStage, WinMLManifest
 from .model_input import (
     ModelInput,
@@ -32,6 +33,7 @@ __all__ = [
     "WinMLManifest",
     "classify_model_input",
     "get_pipeline_tag",
+    "hard_kill_on_ctrl_c",
     "inject_hub_metadata",
     "is_hub_model",
     "load_hf_components_from_onnx",
