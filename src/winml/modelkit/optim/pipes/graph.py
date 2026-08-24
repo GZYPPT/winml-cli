@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from ...onnx import load_onnx, save_onnx
+from ...utils.interrupt import hard_kill_on_ctrl_c_if_main_thread
 from .base import BasePipe, OptimizationError, PipeConfig, caps_dict
 
 
@@ -663,12 +664,15 @@ class ORTGraphPipe(BasePipe[ORTGraphPipeConfig]):
 
             # Create session to trigger optimization
             try:
-                if config.ep_device is None:
-                    session = ort.InferenceSession(
-                        str(input_file), sess_opts, providers=["CPUExecutionProvider"]
-                    )
-                else:
-                    session = ort.InferenceSession(str(input_file), sess_opts)
+                # With an ep_device configured this runs on a real EP and can JIT
+                # natively, so it needs the hard-kill wrap like any other load.
+                with hard_kill_on_ctrl_c_if_main_thread():
+                    if config.ep_device is None:
+                        session = ort.InferenceSession(
+                            str(input_file), sess_opts, providers=["CPUExecutionProvider"]
+                        )
+                    else:
+                        session = ort.InferenceSession(str(input_file), sess_opts)
             except Exception as e:
                 raise OptimizationError(
                     f"ONNX Runtime optimization failed: {e}",

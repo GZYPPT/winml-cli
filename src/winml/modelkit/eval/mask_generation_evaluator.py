@@ -44,6 +44,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 
+from ..utils.interrupt import hard_kill_on_ctrl_c_if_main_thread
 from .base_evaluator import WinMLEvaluator
 
 
@@ -294,18 +295,22 @@ class WinMLMaskGenerationEvaluator(WinMLEvaluator):
         sess_opts = ort.SessionOptions()
         sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
 
-        enc = ort.InferenceSession(
-            paths[self._ENCODER_ROLE],
-            sess_options=sess_opts,
-            providers=providers,
-            provider_options=provider_options,
-        )
-        dec = ort.InferenceSession(
-            paths[self._DECODER_ROLE],
-            sess_options=sess_opts,
-            providers=providers,
-            provider_options=provider_options,
-        )
+        # This evaluator builds its own sessions instead of going through
+        # WinMLSession, so it needs the hard-kill wrap directly: both models
+        # JIT natively on an NPU and would otherwise defer Ctrl+C.
+        with hard_kill_on_ctrl_c_if_main_thread():
+            enc = ort.InferenceSession(
+                paths[self._ENCODER_ROLE],
+                sess_options=sess_opts,
+                providers=providers,
+                provider_options=provider_options,
+            )
+            dec = ort.InferenceSession(
+                paths[self._DECODER_ROLE],
+                sess_options=sess_opts,
+                providers=providers,
+                provider_options=provider_options,
+            )
         logger.info("  encoder providers: %s", enc.get_providers())
         logger.info("  decoder providers: %s", dec.get_providers())
         return enc, dec
