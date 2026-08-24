@@ -26,6 +26,7 @@ from google.protobuf.message import DecodeError
 
 from ..core.onnx_utils import get_io_config
 from ..onnx import get_onnx_model_hash, is_compiled_onnx
+from ..utils.interrupt import hard_kill_on_ctrl_c_if_main_thread
 from ..utils.native_stderr import (
     get_win32_fd_handle,
     get_win32_std_handle,
@@ -507,7 +508,10 @@ class WinMLSession:
                 session_option_entries=self._active_session_option_entries,
                 provider_options=self._provider_options,
             )
-            with _suppress_native_output():
+            # A bare NPU model JITs natively here (measured at 4.27s on a 60k-node
+            # graph), and that call never returns to the bytecode loop, so Ctrl+C
+            # would otherwise be deferred until it finished.
+            with _suppress_native_output(), hard_kill_on_ctrl_c_if_main_thread():
                 self._session = ort.InferenceSession(self._onnx_path, sess_options=so)
             self._running_model_path = self._onnx_path
             _dev = self._ep_device.device
@@ -542,7 +546,9 @@ class WinMLSession:
 
         if not self._persist_jit:
             try:
-                with _suppress_native_output():
+                # Same bare-model JIT as the eager path in __init__: the native
+                # call blocks the bytecode loop, so Ctrl+C needs the OS default.
+                with _suppress_native_output(), hard_kill_on_ctrl_c_if_main_thread():
                     session = ort.InferenceSession(
                         str(self._onnx_path),
                         sess_options=_build_session_options(
@@ -596,7 +602,14 @@ class WinMLSession:
                 session_option_entries=self._active_session_option_entries,
                 provider_options=self._provider_options,
             )
-            with prepared_model, _suppress_native_output(compile_log):
+            # model_path is usually an EPContext artifact and loads fast, but it
+            # falls back to the original ONNX when ModelCompiler declined it --
+            # and that fallback JITs natively just like the paths above.
+            with (
+                prepared_model,
+                _suppress_native_output(compile_log),
+                hard_kill_on_ctrl_c_if_main_thread(),
+            ):
                 session = ort.InferenceSession(str(model_path), sess_options=runtime_so)
 
             actual_providers = session.get_providers()
@@ -724,7 +737,11 @@ class WinMLSession:
                 str(self._onnx_path),
                 embed_compiled_data_into_model=self._embed_context,
             )
-            with _suppress_native_output(compile_log):
+            # generation_path is a unique, lock-held scratch name rather than a
+            # user-visible output, so a hard kill here can only strand a
+            # discardable generation. Reachable from the server's loader thread
+            # as well as the CLI, hence the main-thread-only variant.
+            with _suppress_native_output(compile_log), hard_kill_on_ctrl_c_if_main_thread():
                 model_compiler.compile_to_file(str(generation_path))
         except Exception as exc:
             self._discard_epcontext_generation(generation_path)
@@ -1533,7 +1550,9 @@ class WinMLSession:
                 return None
 
             try:
-                with _suppress_native_output():
+                # active_model_path falls back to the original ONNX when there
+                # was no baseline session, so this rebuild can JIT natively too.
+                with _suppress_native_output(), hard_kill_on_ctrl_c_if_main_thread():
                     self._session = ort.InferenceSession(
                         active_model_path,
                         sess_options=_build_session_options(
@@ -1568,7 +1587,9 @@ class WinMLSession:
                     session_option_entries=desired_sess_entries,
                     provider_options=new_prov,
                 )
-                with _suppress_native_output():
+                # Same fallback as the restore path: active_model_path may be the
+                # original ONNX, in which case this rebuild JITs natively.
+                with _suppress_native_output(), hard_kill_on_ctrl_c_if_main_thread():
                     self._session = ort.InferenceSession(active_model_path, sess_options=so)
                 self._provider_options = new_prov
                 self._active_session_option_entries = desired_sess_entries

@@ -271,9 +271,12 @@ class ORTFusionPipe(BasePipe[ORTFusionPipeConfig]):
         # ORT optimizer requires file path
         input_path = None
         try:
+            # The file is only here to reserve a unique name; save_onnx must run
+            # after the handle is closed, since it publishes via Path.replace()
+            # and Windows refuses to replace a file that is still open.
             with tempfile.NamedTemporaryFile(suffix=".onnx", delete=False) as f:
                 input_path = f.name
-                save_onnx(model, input_path)
+            save_onnx(model, input_path)
 
             # Run optimizer
             optimized = optimizer.optimize_model(

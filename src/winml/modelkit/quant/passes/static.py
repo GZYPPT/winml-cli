@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ...utils import scratch_dir
 from .base import BaseQuantPass
 
 
@@ -148,29 +149,28 @@ class StaticPass(BaseQuantPass):
         if use_external_data:
             qdq_config.use_external_data_format = True
         logger.info("Applying quantization...")
-        abs_model_output = str(Path(output_path).resolve())
-        if output_path.exists():
-            output_path.unlink()
-        stale_sidecar = output_path.parent / f"{output_path.name}.data"
-        if stale_sidecar.exists():
-            stale_sidecar.unlink()
-        original_cwd = Path.cwd()
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            os.chdir(output_path.parent)
-            quantize(
-                model_input=input_model,
-                model_output=abs_model_output,
-                quant_config=qdq_config,
-            )
-        finally:
-            os.chdir(original_cwd)
 
-        qdq_time = time.perf_counter() - qdq_start
+        # quantize() writes an intermediate model that later gets superseded by
+        # the save_onnx() below.  Keep it in a scratch directory so output_path
+        # is only ever touched once, by that final atomic save.
+        with scratch_dir(output_path.parent) as staging:
+            intermediate = staging / output_path.name
+            original_cwd = Path.cwd()
+            try:
+                os.chdir(staging)
+                quantize(
+                    model_input=input_model,
+                    model_output=str(intermediate),
+                    quant_config=qdq_config,
+                )
+            finally:
+                os.chdir(original_cwd)
 
-        postproc_start = time.perf_counter()
+            qdq_time = time.perf_counter() - qdq_start
 
-        quantized_model = load_onnx(output_path, validate=False)
+            postproc_start = time.perf_counter()
+
+            quantized_model = load_onnx(intermediate, validate=False)
 
         logger.info("Fixing QDQ node dtype info...")
         fix_result = fix_qdq_dtype_info(quantized_model)

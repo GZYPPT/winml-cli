@@ -13,6 +13,7 @@ import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ...utils.interrupt import hard_kill_on_ctrl_c_if_main_thread
 from ...utils.python_env import ensure_venv
 from .. import EPDeviceTarget, WinMLEPDevice, WinMLEPRegistry, resolve_device
 from ..session import SessionState, WinMLSession
@@ -255,7 +256,10 @@ class WinMLQairtSession(WinMLSession):
             None,
             self._session_options_factory,
         )
-        self._session = ort.InferenceSession(str(self._ctx_path), sess_options=sess_options)
+        # Loading an EPContext model still runs native EP initialization, which
+        # blocks the bytecode loop and would otherwise defer Ctrl+C.
+        with hard_kill_on_ctrl_c_if_main_thread():
+            self._session = ort.InferenceSession(str(self._ctx_path), sess_options=sess_options)
         # Record the loaded model only after the session is successfully
         # created, so a failed load leaves running_model_path unset.
         self._running_model_path = self._ctx_path

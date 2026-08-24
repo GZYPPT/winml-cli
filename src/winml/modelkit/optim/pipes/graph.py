@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from ...onnx import load_onnx, save_onnx
+from ...utils.interrupt import hard_kill_on_ctrl_c_if_main_thread
 from .base import BasePipe, OptimizationError, PipeConfig, caps_dict
 
 
@@ -535,9 +536,12 @@ class ORTGraphPipe(BasePipe[ORTGraphPipeConfig]):
         input_file = None
 
         try:
+            # The file is only here to reserve a unique name; save_onnx must run
+            # after the handle is closed, since it publishes via Path.replace()
+            # and Windows refuses to replace a file that is still open.
             with tempfile.NamedTemporaryFile(suffix=".onnx", delete=False) as f:
                 input_file = Path(f.name)
-                save_onnx(model, input_file)
+            save_onnx(model, input_file)
             return self._process_path(input_file, model, config)
         finally:
             if input_file is not None:
@@ -660,12 +664,15 @@ class ORTGraphPipe(BasePipe[ORTGraphPipeConfig]):
 
             # Create session to trigger optimization
             try:
-                if config.ep_device is None:
-                    session = ort.InferenceSession(
-                        str(input_file), sess_opts, providers=["CPUExecutionProvider"]
-                    )
-                else:
-                    session = ort.InferenceSession(str(input_file), sess_opts)
+                # With an ep_device configured this runs on a real EP and can JIT
+                # natively, so it needs the hard-kill wrap like any other load.
+                with hard_kill_on_ctrl_c_if_main_thread():
+                    if config.ep_device is None:
+                        session = ort.InferenceSession(
+                            str(input_file), sess_opts, providers=["CPUExecutionProvider"]
+                        )
+                    else:
+                        session = ort.InferenceSession(str(input_file), sess_opts)
             except Exception as e:
                 raise OptimizationError(
                     f"ONNX Runtime optimization failed: {e}",

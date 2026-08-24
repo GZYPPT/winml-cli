@@ -21,6 +21,7 @@ from typing import NoReturn
 import onnx
 from onnx.external_data_helper import _get_all_tensors, uses_external_data
 
+from ..utils import publish_on_success
 from .utils import EXTERNAL_DATA_THRESHOLD, get_model_size
 
 
@@ -166,6 +167,13 @@ def save_onnx(
     Automatically decides whether to write weights inline or as an external
     ``.data`` sidecar file based on model size and options.
 
+    The model is written to a staging directory next to *path* and moved into
+    place only once the write has fully succeeded, so an interrupted or failed
+    save never replaces an existing model with a truncated one. The sidecar is
+    published before the ``.onnx`` that references it. Note that this means a
+    successful overwrite momentarily needs room for both the old and the new
+    model on the destination volume.
+
     Args:
         model: The ``onnx.ModelProto`` to save.
         path: Destination file path.
@@ -190,53 +198,43 @@ def save_onnx(
     else:
         save_external = get_model_size(model) >= threshold_size
 
-    if save_external:
-        ext_location = location or f"{path.name}.data"
-        # Delete any pre-existing sidecar so onnx.save_model doesn't raise
-        # FileExistsError (e.g. when ORT quantize() already wrote the file).
-        ext_path = path.parent / ext_location
-        if ext_path.exists():
-            ext_path.unlink()
-            logger.debug("Removed existing external data sidecar: %s", ext_path)
-        logger.debug(
-            "Saving ONNX model with external data to %s (location=%s)",
-            path,
-            ext_location,
-        )
-        # Temporarily change CWD to the output directory so that the ONNX
-        # library's CWD-relative existence check (external_data_helper.py)
-        # resolves against the correct output directory rather than the
-        # process CWD.  This avoids a false-positive FileExistsError when a
-        # stale .data sidecar exists in the process CWD from a previous build
-        # but the actual output directory is clean.
-        # path.parent is guaranteed to exist: mkdir() was called above.
-        original_cwd = Path.cwd()
-        try:
+    with publish_on_success(path) as working:
+        if save_external:
+            ext_location = location or f"{path.name}.data"
+            logger.debug(
+                "Saving ONNX model with external data to %s (location=%s)",
+                path,
+                ext_location,
+            )
+            # Run from the staging directory: the ONNX library resolves the
+            # external-data location against the CWD, both for the write itself
+            # and for its pre-write existence check.  Staging is empty, so that
+            # check can no longer trip over a stale sidecar left in the process
+            # CWD or at the destination.
+            original_cwd = Path.cwd()
             try:
-                os.chdir(path.parent)
-                onnx.save_model(
-                    model,
-                    path.name,
-                    save_as_external_data=True,
-                    all_tensors_to_one_file=True,
-                    location=ext_location,
-                    size_threshold=1024,
-                )
-            finally:
-                os.chdir(original_cwd)
-        except OSError as e:
-            # A failed external-data write can leave a truncated .onnx and/or
-            # .data sidecar behind; remove them so a later stage never loads a
-            # corrupt model and reports a misleading error.
-            _cleanup_partial_save(path, ext_path)
-            _raise_save_error(e, path)
-    else:
-        logger.debug("Saving ONNX model inline to %s", path)
-        try:
-            onnx.save_model(model, str(path))
-        except OSError as e:
-            _cleanup_partial_save(path)
-            _raise_save_error(e, path)
+                try:
+                    os.chdir(working.parent)
+                    onnx.save_model(
+                        model,
+                        working.name,
+                        save_as_external_data=True,
+                        all_tensors_to_one_file=True,
+                        location=ext_location,
+                        size_threshold=1024,
+                    )
+                finally:
+                    os.chdir(original_cwd)
+            except OSError as e:
+                # No partial-artifact cleanup needed: anything half-written is
+                # inside the staging directory and goes away with it.
+                _raise_save_error(e, path)
+        else:
+            logger.debug("Saving ONNX model inline to %s", path)
+            try:
+                onnx.save_model(model, str(working))
+            except OSError as e:
+                _raise_save_error(e, path)
 
 
 def cleanup_onnx(path: str | Path) -> list[Path]:

@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ...utils import scratch_dir
 from .base import BaseQuantPass
 
 
@@ -145,34 +146,30 @@ class DynamicPass(BaseQuantPass):
         metadata_snapshot = capture_metadata(input_model)
         add_pre_process_metadata(input_model)
 
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        abs_model_output = str(Path(output_path).resolve())
-        if output_path.exists():
-            output_path.unlink()
-        stale_sidecar = output_path.parent / f"{output_path.name}.data"
-        if stale_sidecar.exists():
-            stale_sidecar.unlink()
+        # quantize_dynamic() writes an intermediate model that the save_onnx()
+        # below supersedes.  Keep it in a scratch directory (ORT writes
+        # external-data sidecars relative to the cwd) so output_path is only
+        # ever touched once, by that final atomic save.
+        with scratch_dir(output_path.parent) as staging:
+            intermediate = staging / output_path.name
+            original_cwd = Path.cwd()
+            try:
+                os.chdir(staging)
+                quantize_dynamic(
+                    model_input=input_model,
+                    model_output=str(intermediate),
+                    weight_type=weight_type,
+                    per_channel=self._config.per_channel,
+                    reduce_range=self._config.reduce_range,
+                    op_types_to_quantize=self._config.op_types_to_quantize,
+                    nodes_to_exclude=self._config.nodes_to_exclude or [],
+                    use_external_data_format=use_external_data,
+                    extra_options=extra_options,
+                )
+            finally:
+                os.chdir(original_cwd)
 
-        # ORT writes external-data sidecars relative to the cwd, so run from the
-        # output directory (mirrors StaticPass) to keep the .data file adjacent.
-        original_cwd = Path.cwd()
-        try:
-            os.chdir(output_path.parent)
-            quantize_dynamic(
-                model_input=input_model,
-                model_output=abs_model_output,
-                weight_type=weight_type,
-                per_channel=self._config.per_channel,
-                reduce_range=self._config.reduce_range,
-                op_types_to_quantize=self._config.op_types_to_quantize,
-                nodes_to_exclude=self._config.nodes_to_exclude or [],
-                use_external_data_format=use_external_data,
-                extra_options=extra_options,
-            )
-        finally:
-            os.chdir(original_cwd)
-
-        quantized_model = load_onnx(output_path, validate=False)
+            quantized_model = load_onnx(intermediate, validate=False)
 
         logger.info("Running shape inference on quantized model...")
         quantized_model = infer_shapes(quantized_model)

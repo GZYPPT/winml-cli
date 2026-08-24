@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import os
 import shutil
@@ -28,6 +29,7 @@ from ...session import (
     WinMLSession,
     resolve_device,
 )
+from ...utils import hard_kill_on_ctrl_c_if_main_thread, publish_staged, scratch_dir
 from ...utils.constants import ORT_SESSION_COMPILER
 from ..configs import WinMLCompileConfig
 from .base import BaseStage
@@ -191,36 +193,66 @@ class CompileStage(BaseStage):
         if context.n_total_models > 1 and context.n_compiled_models == context.n_total_models - 1:
             session_options.add_session_config_entry("ep.stop_share_ep_contexts", "1")
 
-        if context.use_inference_session:
-            session_options.add_session_config_entry("ep.context_file_path", str(ctx_path))
-            session = ort.InferenceSession(str(model_path), sess_options=session_options)
-            try:
-                context.session = session
-                context.log(f"Actual providers: {session.get_providers()}")
-                if context.validate:
-                    self._validate_model(session, context)
-                self._collect_model_info(session, context)
-            finally:
-                context.session = None
-                del session
-        else:
-            ort.ModelCompiler(
-                session_options,
-                str(model_path),
-                embed_compiled_data_into_model=ep_config.embed_context,
-            ).compile_to_file(str(ctx_path))
+        # The native calls below write for minutes and may be hard-killed
+        # mid-write, so they must not be pointed at ctx_path directly. Compile
+        # into a staging directory beside it and publish once the call returns;
+        # the EP drops .bin sidecars next to the model, and those come along.
+        #
+        # Shared multi-model compilation is excluded: with ep.share_ep_contexts
+        # the shared binary is only flushed once ep.stop_share_ep_contexts is
+        # set on the final model, so per-model staging directories would leave
+        # the earlier models referencing a .bin published elsewhere. That flow
+        # keeps its previous layout and gets the hard-kill wrap only.
+        shares_context = context.n_total_models > 1
+        with contextlib.ExitStack() as stack:
+            if shares_context:
+                staging = None
+                staged_ctx_path = ctx_path
+            else:
+                staging = stack.enter_context(scratch_dir(ctx_path.parent))
+                staged_ctx_path = staging / ctx_path.name
 
-        if ctx_path.exists():
-            context.output_path = ctx_path
-            binaries = [
-                path
-                for path in ctx_path.parent.glob(f"{ctx_path.stem}*.bin")
-                if not path.name.endswith("_schematic.bin")
-            ]
-            if binaries:
-                context.context_binary_path = binaries[0]
-        else:
-            context.add_warning(f"No EPContext produced for {model_path.name}")
+            if context.use_inference_session:
+                session_options.add_session_config_entry(
+                    "ep.context_file_path", str(staged_ctx_path)
+                )
+                with hard_kill_on_ctrl_c_if_main_thread():
+                    session = ort.InferenceSession(str(model_path), sess_options=session_options)
+                try:
+                    context.session = session
+                    context.log(f"Actual providers: {session.get_providers()}")
+                    if context.validate:
+                        self._validate_model(session, context)
+                    self._collect_model_info(session, context)
+                finally:
+                    context.session = None
+                    del session
+            else:
+                compiler = ort.ModelCompiler(
+                    session_options,
+                    str(model_path),
+                    embed_compiled_data_into_model=ep_config.embed_context,
+                )
+                with hard_kill_on_ctrl_c_if_main_thread():
+                    compiler.compile_to_file(str(staged_ctx_path))
+
+            # Producing nothing is a legitimate outcome here (the EP may decline
+            # the model), so report it rather than letting publish raise.
+            if not staged_ctx_path.is_file():
+                context.add_warning(f"No EPContext produced for {model_path.name}")
+                return
+
+            if staging is not None:
+                publish_staged(staging, ctx_path)
+
+        context.output_path = ctx_path
+        binaries = [
+            path
+            for path in ctx_path.parent.glob(f"{ctx_path.stem}*.bin")
+            if not path.name.endswith("_schematic.bin")
+        ]
+        if binaries:
+            context.context_binary_path = binaries[0]
 
     def _get_output_dir(self, context: CompileContext) -> Path:
         """Determine the output directory for compiled model.
