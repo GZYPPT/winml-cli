@@ -26,6 +26,7 @@ from google.protobuf.message import DecodeError
 
 from ..core.onnx_utils import get_io_config
 from ..onnx import get_onnx_model_hash, is_compiled_onnx
+from ..utils.interrupt import hard_kill_on_ctrl_c_if_main_thread
 from ..utils.native_stderr import (
     get_win32_fd_handle,
     get_win32_std_handle,
@@ -724,7 +725,11 @@ class WinMLSession:
                 str(self._onnx_path),
                 embed_compiled_data_into_model=self._embed_context,
             )
-            with _suppress_native_output(compile_log):
+            # generation_path is a unique, lock-held scratch name rather than a
+            # user-visible output, so a hard kill here can only strand a
+            # discardable generation. Reachable from the server's loader thread
+            # as well as the CLI, hence the main-thread-only variant.
+            with _suppress_native_output(compile_log), hard_kill_on_ctrl_c_if_main_thread():
                 model_compiler.compile_to_file(str(generation_path))
         except Exception as exc:
             self._discard_epcontext_generation(generation_path)

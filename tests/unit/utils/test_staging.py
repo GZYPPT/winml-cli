@@ -10,7 +10,12 @@ from pathlib import Path
 
 import pytest
 
-from winml.modelkit.utils import STAGING_PREFIX, publish_on_success, scratch_dir
+from winml.modelkit.utils import (
+    STAGING_PREFIX,
+    publish_on_success,
+    publish_staged,
+    scratch_dir,
+)
 
 
 def _staging_entries(directory: Path) -> list[Path]:
@@ -171,3 +176,35 @@ def test_publish_on_success_skips_directories_in_staging(
     assert destination.read_text() == "graph"
     assert not (tmp_path / "ctx_dir").exists()
     assert "ctx_dir" in caplog.text
+
+
+def test_publish_staged_moves_bundle_next_to_destination(tmp_path: Path) -> None:
+    """The compile path publishes a whole directory of artifacts at once."""
+    destination = tmp_path / "model_ctx.onnx"
+    destination.write_text("previous")
+
+    with scratch_dir(tmp_path) as staging:
+        (staging / destination.name).write_text("compiled")
+        (staging / "model_ctx.bin").write_text("binary")
+        assert destination.read_text() == "previous"
+
+        publish_staged(staging, destination)
+
+    assert destination.read_text() == "compiled"
+    assert (tmp_path / "model_ctx.bin").read_text() == "binary"
+    assert _staging_entries(tmp_path) == []
+
+
+def test_publish_staged_raises_when_primary_missing(tmp_path: Path) -> None:
+    """Sidecars alone are not a publishable result."""
+    destination = tmp_path / "model_ctx.onnx"
+    destination.write_text("previous")
+
+    with scratch_dir(tmp_path) as staging:
+        (staging / "model_ctx.bin").write_text("binary")
+
+        with pytest.raises(FileNotFoundError, match="nothing was written"):
+            publish_staged(staging, destination)
+
+    assert destination.read_text() == "previous"
+    assert not (tmp_path / "model_ctx.bin").exists()

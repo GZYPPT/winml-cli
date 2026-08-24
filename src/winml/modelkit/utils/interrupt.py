@@ -44,6 +44,9 @@ def hard_kill_on_ctrl_c() -> Iterator[None]:
     Nesting is safe: the inner block restores ``SIG_DFL``, which is what the
     outer block installed.
 
+    See :func:`hard_kill_on_ctrl_c_if_main_thread` for call sites that are
+    reachable both from the CLI's main thread and from a worker thread.
+
     Raises:
         RuntimeError: If called from any thread other than the main thread.
             Signal handlers are process-wide and can only be installed from the
@@ -61,3 +64,24 @@ def hard_kill_on_ctrl_c() -> Iterator[None]:
         # None, which signal.signal() refuses to take. Nothing better is
         # available in that case, so leave the OS default in place.
         signal.signal(signal.SIGINT, signal.SIG_DFL if previous is None else previous)
+
+
+@contextlib.contextmanager
+def hard_kill_on_ctrl_c_if_main_thread() -> Iterator[None]:
+    """Arm :func:`hard_kill_on_ctrl_c` when possible, else do nothing.
+
+    Some long native calls are reachable both from the CLI (main thread, where
+    a stuck Ctrl+C is the problem being solved) and from a worker thread -- the
+    server loads models through ``run_in_executor``, for instance. Signal
+    handlers can only be installed from the main thread, so arming
+    unconditionally would turn a background load into a ``RuntimeError``.
+
+    Off the main thread this is a no-op: the call is not blocking anyone's
+    Ctrl+C, because the main thread is still free to run Python.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    with hard_kill_on_ctrl_c():
+        yield

@@ -83,17 +83,30 @@ def publish_on_success(destination: str | Path) -> Iterator[Path]:
 
     with scratch_dir(destination.parent) as staging:
         yield staging / destination.name
-        _publish(staging, destination)
+        publish_staged(staging, destination)
 
 
-def _publish(staging: Path, destination: Path) -> None:
+def publish_staged(staging: str | Path, destination: str | Path) -> None:
     """Move everything in *staging* next to *destination*, primary file last.
 
     Order matters: an ``.onnx`` file references its external-data sidecar by
     filename, so the sidecars must be in place before the ``.onnx`` appears.
     Publishing the primary file first would leave a window in which the model
     at *destination* points at a file that does not exist yet.
+
+    Prefer :func:`publish_on_success`. Call this directly only when producing
+    nothing is a legitimate outcome the caller has to report itself, since this
+    still treats a missing primary as an error.
+
+    Args:
+        staging: Directory holding the operation's output.
+        destination: Final path for the primary file; siblings go beside it.
+
+    Raises:
+        FileNotFoundError: If no file named after *destination* is in *staging*.
     """
+    staging = Path(staging)
+    destination = Path(destination)
     primary = staging / destination.name
     if not primary.is_file():
         msg = f"nothing was written to {primary}"

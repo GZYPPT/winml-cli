@@ -20,7 +20,7 @@ import threading
 
 import pytest
 
-from winml.modelkit.utils import hard_kill_on_ctrl_c
+from winml.modelkit.utils import hard_kill_on_ctrl_c, hard_kill_on_ctrl_c_if_main_thread
 
 
 def test_installs_default_handler_inside_block() -> None:
@@ -114,4 +114,52 @@ def test_does_not_disturb_handler_when_rejected_off_main_thread() -> None:
     worker.join()
 
     assert observed == [before]
+    assert signal.getsignal(signal.SIGINT) is before
+
+
+def test_tolerant_variant_arms_on_main_thread() -> None:
+    """On the main thread it behaves exactly like the strict version."""
+    before = signal.getsignal(signal.SIGINT)
+
+    with hard_kill_on_ctrl_c_if_main_thread():
+        assert signal.getsignal(signal.SIGINT) is signal.SIG_DFL
+
+    assert signal.getsignal(signal.SIGINT) is before
+
+
+def test_tolerant_variant_is_a_noop_off_main_thread() -> None:
+    """A worker thread must get a no-op, not a RuntimeError.
+
+    The server loads models through run_in_executor, so the same native call
+    is reachable off the main thread; raising there would turn a background
+    load into a failure.
+    """
+    before = signal.getsignal(signal.SIGINT)
+    ran: list[bool] = []
+    failures: list[BaseException] = []
+
+    def target() -> None:
+        try:
+            with hard_kill_on_ctrl_c_if_main_thread():
+                ran.append(True)
+        except BaseException as exc:
+            failures.append(exc)
+
+    worker = threading.Thread(target=target)
+    worker.start()
+    worker.join()
+
+    assert failures == []
+    assert ran == [True]
+    assert signal.getsignal(signal.SIGINT) is before
+
+
+def test_tolerant_variant_restores_handler_on_exception() -> None:
+    """Arming on the main thread still unwinds cleanly."""
+    before = signal.getsignal(signal.SIGINT)
+
+    with pytest.raises(RuntimeError, match="boom"), hard_kill_on_ctrl_c_if_main_thread():
+        msg = "boom"
+        raise RuntimeError(msg)
+
     assert signal.getsignal(signal.SIGINT) is before
